@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from mxnet import nd
 from mxnet.contrib.ndarray import MultiBoxPrior, MultiBoxTarget, MultiBoxDetection
-from mxnet.contrib.symbol import MultiBoxPrior
+# from mxnet.contrib.symbol import MultiBoxPrior
 from mxnet.gluon import nn
 from mxnet import gluon
 from mxnet import metric
@@ -19,7 +19,8 @@ from mxnet import autograd
 import mxnet as mx
 
 from config.config import cfg
-#from dataset.iterator import Det6DRecordIter
+from dataset.iterator import Det6DRecordIter
+from MultiBoxDetection import myMultiBoxDetection
 
 
 def get_scales(min_scale=0.2, max_scale=0.9,num_layers=6):
@@ -64,25 +65,30 @@ def get_scales(min_scale=0.2, max_scale=0.9,num_layers=6):
 
 def class_predictor(num_anchors, num_classes):
     """return a layer to predict classes"""
-    return nn.Conv2D(channels=num_anchors * (num_classes + 1), kernel_size=3, padding=1, strides=1)
+    out = nn.Conv2D(channels=num_anchors * (num_classes + 1), kernel_size=3, padding=1, strides=1)
+    out.collect_params(select='.*bias').setattr('lr_mult', 2.0)
+    return out
 
 
 def box_predictor(num_anchors):
     """return a layer to predict delta locations"""
-    return nn.Conv2D(num_anchors * 4, kernel_size=3, padding=1, strides=1)
+    out = nn.Conv2D(num_anchors * 4, kernel_size=3, padding=1, strides=1)
+    out.collect_params(select='.*bias').setattr('lr_mult', 2.0)
+    return out
 
 
 def down_sample(num_filters, stride, padding, prefix=''):
-    """stack two Conv-BatchNorm-Relu blocks and then a pooling layer
+    """stack two Conv-BatchNorm-Relu blocks
     to halve the feature size"""
     out = nn.HybridSequential(prefix=prefix)
 
     with out.name_scope():
-        out.add(nn.Conv2D(num_filters // 2, kernel_size=1, strides=1, padding=0))
-        out.add(nn.Activation('relu'))
-        out.add(nn.Conv2D(num_filters, 3, strides=stride, padding=padding))
-        out.add(nn.Activation('relu'))
+        out.add(nn.Conv2D(num_filters // 2, kernel_size=1, strides=1, padding=0, prefix='conv_1x1_conv_'))
+        out.add(nn.Activation('relu', prefix='conv_1x1_relu_'))
+        out.add(nn.Conv2D(num_filters, 3, strides=stride, padding=padding, prefix='conv_3x3_conv_'))
+        out.add(nn.Activation('relu', prefix='conv_3x3_relu_'))
 
+    out.collect_params(select='.*bias').setattr('lr_mult', 2.0)
     return out
 
 
@@ -98,7 +104,7 @@ def training_targets(anchors, class_preds, labels):
     '''
     class_preds = class_preds.transpose(axes=(0, 2, 1)) # batchsize x num_cls x num_anchors
     box_target, box_mask, cls_target = MultiBoxTarget(anchors, labels, class_preds, overlap_threshold=.5, \
-        ignore_label=-1, negative_mining_ratio=2, minimum_negative_samples=0, \
+        ignore_label=-1, negative_mining_ratio=3, minimum_negative_samples=0, \
         negative_mining_thresh=.5, variances=(0.1, 0.1, 0.2, 0.2),
         name="multibox_target")
 
@@ -113,6 +119,21 @@ def concat_predictions(preds):
     return nd.concat(*preds, dim=1)
 
 
+class NormScale(gluon.HybridBlock):
+    def __init__(self, channel, scale, prefix='scale_'):
+        super(NormScale, self).__init__(prefix=prefix)
+        with self.name_scope():
+            self._channel = channel
+            self._scale = scale
+            self.weight = self.params.get('scale', shape=(1, channel, 1, 1),
+                                          init=mx.init.Constant(scale), wd_mult=0.1)
+
+    def hybrid_forward(self, F, x, *args, **kwargs):
+        x = F.L2Normalization(x, mode="channel")
+        x = F.broadcast_mul(lhs=x, rhs=self.weight.data())
+        return x
+
+
 class SSD(gluon.HybridBlock):
     def __init__(self, network, data_shape, num_classes=1, num_view_classes=337, num_inplane_classes=18, verbose=False, **kwargs):
         super(SSD, self).__init__(prefix='ssd_', **kwargs)
@@ -125,7 +146,8 @@ class SSD(gluon.HybridBlock):
                 self.sizes = get_scales(min_scale=0.15, max_scale=0.9, num_layers=len(self.from_layers))
                 self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
                           [1, 2, .5, 3, 1. / 3], [1, 2, .5], [1, 2, .5]]
-                self.normalizations = [20, -1, -1, -1, -1, -1, -1]  # to be done
+                self.normalizations = [20, -1, -1, -1, -1, -1, -1]
+                self.normscale = NormScale(channel=self.num_filters[0], scale=self.normalizations[0], prefix='ssd_relu4_3_norm_')
                 self.steps = [] if data_shape != 512 else [x / 512.0 for x in
                                                       [8, 16, 32, 64, 128, 256, 512]]
             else:
@@ -137,9 +159,32 @@ class SSD(gluon.HybridBlock):
                 self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
                           [1, 2, .5], [1, 2, .5]]
                 self.normalizations = [20, -1, -1, -1, -1, -1]
+                self.normscale = NormScale(channel=self.num_filters[0], scale=self.normalizations[0], prefix='ssd_relu4_3_norm_')
                 self.steps = [] if data_shape != 300 else [x / 300.0 for x in [8, 16, 32, 64, 100, 300]]
             if not (data_shape == 300 or data_shape == 512):
                 raise NotImplementedError("No implementation for shape: " + data_shape)
+        elif network == 'inceptionv3':
+            if data_shape >= 448:
+                self.from_layers = ['ch_concat_mixed_7_chconcat', 'ch_concat_mixed_10_chconcat', '', '', '', '']
+                self.num_filters = [-1, -1, 512, 256, 256, 128]
+                self.strides = [-1, -1, 2, 2, 2, 2]
+                self.pads = [-1, -1, 1, 1, 1, 1]
+                self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
+                self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
+                          [1, 2, .5], [1, 2, .5]]
+                self.normalizations = -1
+                self.steps = []
+            else:
+                self.from_layers = ['ch_concat_mixed_2_chconcat', 'ch_concat_mixed_7_chconcat',
+                               'ch_concat_mixed_10_chconcat', '', '', '']
+                self.num_filters = [-1, -1, -1, 256, 256, 128]
+                self.strides = [-1, -1, -1, 2, 2, 2]
+                self.pads = [-1, -1, -1, 1, 1, 1]
+                self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
+                self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
+                          [1, 2, .5], [1, 2, .5]]
+                self.normalizations = -1
+                self.steps = []
         else:
             raise NotImplementedError("No implementation for network: " + network)
         # anchor box sizes and ratios for 6 feature scales
@@ -162,7 +207,7 @@ class SSD(gluon.HybridBlock):
         assert len(self.from_layers) == len(self.num_filters) == len(self.strides) == len(self.pads)
 
         if self.network == 'vgg16_reduced':
-            multifeatures = nn.HybridSequential(prefix='multifeatures_')
+            multifeatures = nn.HybridSequential(prefix='multi_feat_')
             with multifeatures.name_scope():
                 vgg16_reduced = VGG16_reduced(self.num_classes)
             for k, params in enumerate(zip(self.from_layers, self.num_filters, self.strides, self.pads)):
@@ -174,6 +219,32 @@ class SSD(gluon.HybridBlock):
                     # attach from last feature layer
                     with multifeatures.name_scope():
                         multifeatures.add(down_sample(num_filters=num_filter, stride=s, padding=p, prefix='{}_'.format(k)))
+
+            class_predictors = nn.HybridSequential(prefix="class_preds_")
+            box_predictors = nn.HybridSequential(prefix="box_preds_")
+            for i in range(len(multifeatures)):
+                with class_predictors.name_scope():
+                    class_predictors.add(class_predictor(self.num_anchors[i], self.num_classes))
+                with box_predictors.name_scope():
+                    box_predictors.add(box_predictor(self.num_anchors[i]))
+            model = nn.HybridSequential(prefix="")
+            with model.name_scope():
+                model.add(multifeatures, class_predictors, box_predictors)
+            return model
+        elif self.network == 'inceptionv3':
+            multifeatures = nn.HybridSequential(prefix='multifeatures_')
+            with multifeatures.name_scope():
+                vgg16_reduced = VGG16_reduced(self.num_classes)
+            for k, params in enumerate(zip(self.from_layers, self.num_filters, self.strides, self.pads)):
+                from_layer, num_filter, s, p = params
+                if from_layer.strip():
+                    with multifeatures.name_scope():
+                        multifeatures.add(vgg16_reduced.dict[from_layer])
+                if not from_layer.strip():
+                    # attach from last feature layer
+                    with multifeatures.name_scope():
+                        multifeatures.add(
+                            down_sample(num_filters=num_filter, stride=s, padding=p, prefix='{}_'.format(k)))
 
             class_predictors = nn.HybridSequential(prefix="class_preds_")
             box_predictors = nn.HybridSequential(prefix="box_preds_")
@@ -222,12 +293,13 @@ class SSD(gluon.HybridBlock):
 
     def params_init(self, ctx):
         self.model.collect_params().initialize(mx.init.Xavier(magnitude=2), ctx=ctx)
+        self.normscale.collect_params().initialize(ctx=ctx)
         self.init_body_params(ctx)
 
     def init_body_params(self, ctx):
         if self.network == 'vgg16_reduced':
             self.model[0][0].load_params(filename="./models/vgg16_reduced-0001.params",
-                                          ctx=ctx, allow_missing=False, ignore_extra=True)
+                                          ctx=ctx, allow_missing=True, ignore_extra=True)
             self.model[0][1].load_params(filename="./models/vgg16_reduced-0001.params",
                                           ctx=ctx, allow_missing=False, ignore_extra=True)
         else:
@@ -241,10 +313,15 @@ class SSD(gluon.HybridBlock):
         for i in range(len(multifeatures)):
             x = multifeatures[i](x)
             # normalize
-            if self.normalizations[i] > 0:
-                x = F.L2Normalization(data=x, mode="channel")
-                scale = F.ones(shape=(1, self.num_filters[i], 1, 1)) * self.normalizations[i]
-                x = F.broadcast_mul(lhs=scale, rhs=x)
+            # if self.normalizations[i] > 0:
+            #     x = F.L2Normalization(data=x, mode="channel")
+                # scale = F.ones(shape=(1, self.num_filters[i], 1, 1)) * 1.0 #self.normalizations[i]
+                # scale = gluon.Parameter(name="{}_scale".format('relu4_3'), grad_req='write',
+                #                         shape=(1, self.num_filters[i], 1, 1), lr_mult=1.0,
+                #                         wd_mult=0.1, init=mx.init.Constant(self.normalizations[i]))
+                # scale.initialize(ctx=ctx)
+
+                # x = F.broadcast_mul(lhs=scale.data(ctx), rhs=x)
 
             # predict
             if self.steps:
@@ -254,10 +331,16 @@ class SSD(gluon.HybridBlock):
 
             anchors.append(MultiBoxPrior(
                 x, sizes=self.sizes[i], ratios=self.ratios[i], clip=False, steps=step))
-            class_preds.append(
-                flatten_prediction(class_predictors[i](x)))
-            box_preds.append(
-                flatten_prediction(box_predictors[i](x)))
+            if self.normalizations[i] > 0:
+                class_preds.append(
+                    flatten_prediction(class_predictors[i](self.normscale(x))))
+                box_preds.append(
+                    flatten_prediction(box_predictors[i](self.normscale(x))))
+            else:
+                class_preds.append(
+                    flatten_prediction(class_predictors[i](x)))
+                box_preds.append(
+                    flatten_prediction(box_predictors[i](x)))
 
             if self.verbose:
                 print('Predict scale', i, x.shape, 'with',
@@ -387,7 +470,7 @@ class MaskMAE(mx.metric.EvalMetric):
                 label = label.reshape(label.shape[0], 1)
 
             self.sum_metric += np.abs(label - pred * mask).sum() / mask.sum()
-            self.num_inst += 1  # numpy.prod(label.shape)
+            self.num_inst += 4  # numpy.prod(label.shape)
 
 
 class MApMetric(mx.metric.EvalMetric):
@@ -717,7 +800,7 @@ def get_optimizer_params(optimizer=None, learning_rate=None, momentum=None,
         optimizer_params = {'learning_rate': learning_rate,
                             'lr_scheduler': lr_scheduler,
                             'clip_gradient': None,
-                            'rescale_grad': 1.0 / len(ctx) if len(ctx) > 0 else 1.0}
+                            'rescale_grad': 1.0}
     return opt, optimizer_params
 
 
@@ -863,7 +946,7 @@ class VGG16_reduced(nn.HybridBlock):
                     nn.Conv2D(channels=512, kernel_size=3, strides=1, padding=1, prefix="conv4_2_"),
                     nn.Activation(activation="relu", prefix="relu4_2_"),
                     nn.Conv2D(channels=512, kernel_size=3, strides=1, padding=1, prefix="conv4_3_"),
-                    nn.Activation(activation="relu", prefix="relu4_3_")
+                    nn.Activation(activation="relu", prefix="relu4_3_"),
                 )
 
             self.relu7 = nn.HybridSequential(prefix="relu7_")
@@ -916,14 +999,35 @@ class VGG16_reduced(nn.HybridBlock):
         return y
 
 
+class Inceptionv3(nn.HybridBlock):
+    def __init__(self, num_classes, verbose=False, **kwargs):
+        super(Inceptionv3, self).__init__(prefix='inceptionv3_', **kwargs)
+        self.verbose = verbose
+        self.num_class = num_classes
+
+    def Conv(self, data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
+        conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
+                                  name='%s%s_conv2d' % (name, suffix))
+        bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
+        act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
+        return act
+
+    def get_symbol(self):
+        self.whole_net.hybridize()
+        x = mx.sym.var('data')
+        y = self.whole_net(x)
+        self.dict = {'relu4_3': self.relu4_3,
+                     'relu7': self.relu7}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a Single-shot detection network')
     parser.add_argument('--train-path', dest='train_path', help='train record to use',
-                        default=os.path.join(os.getcwd(), 'data', 'COCO+LINEMOD_obj01', 'rec', 'train.rec'), type=str)
+                        default=os.path.join(os.getcwd(), 'data', 'VOC0712rec', 'train.rec'), type=str)
     parser.add_argument('--train-list', dest='train_list', help='train list to use',
                         default="", type=str)
     parser.add_argument('--val-path', dest='val_path', help='validation record to use',
-                        default=os.path.join(os.getcwd(), 'data', 'COCO+LINEMOD_obj01', 'rec', 'val.rec'), type=str)
+                        default=os.path.join(os.getcwd(), 'data', 'VOC0712rec', 'val.rec'), type=str)
     parser.add_argument('--val-list', dest='val_list', help='validation list to use',
                         default="", type=str)
     parser.add_argument('--network', dest='network', type=str, default='vgg16_reduced',
@@ -980,7 +1084,7 @@ def parse_args():
                         help='monitor parameter pattern, as regex')
     parser.add_argument('--num-class', dest='num_class', type=int, default=20,
                         help='number of classes')
-    parser.add_argument('--num-example', dest='num_example', type=int, default=5717,
+    parser.add_argument('--num-example', dest='num_example', type=int, default=16551,
                         help='number of image examples')
     parser.add_argument('--class-names', dest='class_names', type=str,
                         default='aeroplane, bicycle, bird, boat, bottle, bus, \
@@ -1013,15 +1117,23 @@ if __name__ == '__main__':
     data_shape = (3, args.data_shape, args.data_shape)
     batch_size = args.batch_size
     mean_pixels = [args.mean_r, args.mean_g, args.mean_b]
+
     num_samples = args.num_example
-    num_batches = math.ceil(num_samples / batch_size)
+
     label_pad_width = args.label_width
     colors = ['blue', 'green', 'red', 'black', 'magenta']
     train_path = args.train_path
     train_list = args.train_list
     val_path = args.val_path
     val_list = args.val_list
-    ctx = gpu(0)
+
+    if os.path.exists(train_path.replace('.rec','.idx')):
+        with open(train_path.replace('.rec','.idx'), 'r') as f:
+            txt = f.readlines()
+        num_samples = len(txt)
+
+    num_batches = math.ceil(num_samples / batch_size)
+    ctx = mx.gpu(int(args.gpus))
     checkpoint_period = 10
     use_visdom = True
     log_file = 'train.log'
@@ -1029,6 +1141,13 @@ if __name__ == '__main__':
     class_name = 'aeroplane, bicycle, bird, boat, bottle, bus, car, cat, chair, cow, diningtable, dog, horse, motorbike, ' \
                  'person, pottedplant, sheep, sofa, train, tvmonitor'
     class_name = class_name.split(', ')
+
+    # export mxnet pretrained models
+    # data = mx.nd.ones(shape=(1,3,224,224))
+    # net = gluon.model_zoo.vision.resnet50_v2(pretrained=True)
+    # net.hybridize()
+    # out = net(data)
+    # net.export(path='./', epoch=0)
 
     # set up logger
     logging.basicConfig()
@@ -1058,19 +1177,20 @@ if __name__ == '__main__':
 
     cls_metric = mx.metric.Accuracy(axis=-1)
     box_metric = MaskMAE()
-    val_metric = MApMetric(ovp_thresh=0.45, class_names=class_name, roc_output_path=os.path.join(os.path.dirname(prefix), 'roc'))
+    val_metric = VOC07MApMetric(ovp_thresh=0.45, class_names=class_name, roc_output_path=os.path.join(os.path.dirname(prefix), 'roc'))
 
     net = SSD(network=args.network, data_shape=args.data_shape, num_classes=20, verbose=False)
     net.params_init(ctx)
-    net.hybridize()
+    # net.hybridize()
 
     # freeze several layers
     net.collect_params('.*(vgg16_reduced_relu4_3_conv1_|vgg16_reduced_relu4_3_conv2_).*').setattr('grad_req', 'null')
     # finetune mode
-    net.collect_params('.*(bias)$').setattr('lr_mult', 2)
-    net.collect_params('.*(vgg16_reduced).*(bias)$').setattr('lr_mult', 1)
+    # net.collect_params('.*(bias)$').setattr('lr_mult', 2)
+    # net.collect_params('.*(vgg16_reduced).*(bias)$').setattr('lr_mult', 1)
+    # print(net.collect_params(select='.*(vgg16_reduced_relu4_3_conv1_|vgg16_reduced_relu4_3_conv2_).*'))
 
-
+    # start visdom: $ sudo python3 -m visdom.server
     if use_visdom:
         train_cls_loss_logger = VisdomPlotLogger(
             'line', port=8097, opts={'title': 'Train Classification Loss'}
@@ -1080,10 +1200,10 @@ if __name__ == '__main__':
         )
     cnt = 0
 
-    learning_rate, lr_scheduler = get_lr_scheduler(learning_rate=0.004, lr_refactor_ratio=0.1,
-                                    lr_refactor_step='80, 160', num_example=5717, batch_size=batch_size, begin_epoch=0)
+    learning_rate, lr_scheduler = get_lr_scheduler(learning_rate=args.learning_rate, lr_refactor_ratio=0.1,
+                                    lr_refactor_step='80, 160', num_example=num_samples, batch_size=batch_size, begin_epoch=0)
     # add possibility for different optimizer
-    opt, opt_params = get_optimizer_params(optimizer='sgd', learning_rate=learning_rate, momentum=0.9,
+    opt, opt_params = get_optimizer_params(optimizer=args.optimizer, learning_rate=learning_rate, momentum=0.9,
                                             weight_decay=5e-4, lr_scheduler=lr_scheduler, ctx=ctx)
 
     trainer = gluon.Trainer(net.collect_params(), opt, opt_params)
@@ -1091,7 +1211,8 @@ if __name__ == '__main__':
     logger.info('data_shape: {}, batch_size: {}, train_cls_loss: {}, train_bbox_loss: {}.'.format(
         data_shape, batch_size, cls_loss.prefix, box_loss.prefix
     ))
-    logger.info('learning rate: {}, lr_refactor_ratio: 0.1, lr_refactor_step: 80,160'.format(learning_rate))
+    logger.info('optimizer: {}, learning rate: {}, lr_refactor_ratio: 0.1, lr_refactor_step: 80,160'.format(
+        args.optimizer, learning_rate))
 
     for epoch in range(240):
         # reset data iterators and metrics
@@ -1110,7 +1231,7 @@ if __name__ == '__main__':
 
         for i, batch in enumerate(train_iter):
             btic = time.time()
-            x = batch.data[0].as_in_context(ctx)   # 32 x 3 x 300 x 300
+            x = batch.data[0].as_in_context(ctx)  # 32 x 3 x 300 x 300
             y = batch.label[0].as_in_context(ctx)   # 32 x 43 x 8
 
             with autograd.record():
@@ -1130,14 +1251,16 @@ if __name__ == '__main__':
                     box_target, box_mask, cls_target = training_targets(anchors, class_preds, y)
 
                     cls_positive_mask = cls_target > 0
-                    num_positive = mx.nd.sum(data=cls_positive_mask, axis=1, keepdims=False, exclude=False).asnumpy()
+                    # cls_target_np = cls_target.asnumpy()
+                    # cls_target_in_use = cls_target_np[cls_target_np.nonzero()]
+                    # num_positive = mx.nd.sum(data=cls_positive_mask, axis=1, keepdims=False, exclude=False).asnumpy()
                     cls_positive_negative_mask = cls_target >= 0
-                    num_positive_negative = mx.nd.sum(data=cls_positive_negative_mask, axis=1, keepdims=False, exclude=False).asnumpy()
+                    # num_positive_negative = mx.nd.sum(data=cls_positive_negative_mask, axis=1, keepdims=False, exclude=False).asnumpy()
                 # losses
                 loss_cls = cls_loss(class_preds, cls_target, cls_positive_negative_mask)
                 loss_bbox = box_loss(box_preds, box_target, box_mask)
 
-                loss = loss_cls + 3.0 * loss_bbox
+                loss =  1.0 * loss_bbox + 1.0 * loss_cls
 
             cls_loss_list.append(nd.mean(loss_cls)[0].asscalar())
             reg_loss_list.append(nd.mean(loss_bbox)[0].asscalar())
@@ -1152,10 +1275,10 @@ if __name__ == '__main__':
                 val1 = np.mean(cls_loss_list)
                 val2 = np.mean(reg_loss_list)
 
-                logger.info('[Epoch %d Batch %d] speed: %f samples/s, training: %s=%f, %s=%f, %s=%f' % (
+                logger.info('[Epoch %d Batch %d] speed: %f samples/s, training: %s=%f, %s=%f, %s=%f, %s=%f' % (
                     epoch, i, batch_size / (time.time() - btic), "cls loss", val1, "reg loss", val2,
-                    "box metric", box_metric.get()[1]))
-                if True:
+                    "cls_metric", cls_metric.get()[1], "box metric", box_metric.get()[1]))
+                if use_visdom:
                     train_cls_loss_logger.log(cnt, val1)
                     train_reg_loss_logger.log(cnt, val2)
                 cls_loss_list = []
@@ -1165,9 +1288,9 @@ if __name__ == '__main__':
             train_cls_loss += nd.mean(loss_cls).asscalar()
             train_bbox_loss += nd.mean(loss_bbox).asscalar()
 
-            print("train_cls_loss: %5f, train_box_loss %5f,"
-                  "time %.1f sec"
-                  % (nd.mean(loss_cls).asscalar(), nd.mean(loss_bbox).asscalar(), time.time() - tic))
+            # print("train_cls_loss: %5f, train_box_loss %5f,"
+            #       "time %.1f sec"
+            #       % (nd.mean(loss_cls).asscalar(), nd.mean(loss_bbox).asscalar(), time.time() - tic))
 
         if epoch % checkpoint_period == 0:
             net.save_params(filename='output/exp1/ssd_{}_{}_epoch{}.params'.format(net.network,
@@ -1182,7 +1305,6 @@ if __name__ == '__main__':
                 det = MultiBoxDetection(*[cls_probs, box_preds, anchors], \
                     name="detection", nms_threshold=0.45, force_suppress=False,
                     variances=(0.1, 0.1, 0.2, 0.2), nms_topk=400)
-                det_np = det.asnumpy()
 
                 val_metric.update(labels=[y], preds=[det])
             names, values = val_metric.get()
