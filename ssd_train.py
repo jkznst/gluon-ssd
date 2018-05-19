@@ -162,28 +162,28 @@ class SSD(gluon.HybridBlock):
                 self.steps = [] if data_shape != 300 else [x / 300.0 for x in [8, 16, 32, 64, 100, 300]]
             if not (data_shape == 300 or data_shape == 512):
                 raise NotImplementedError("No implementation for shape: " + data_shape)
-        elif network == 'inceptionv3':
-            if data_shape >= 448:
-                self.from_layers = ['ch_concat_mixed_7_chconcat', 'ch_concat_mixed_10_chconcat', '', '', '', '']
-                self.num_filters = [-1, -1, 512, 256, 256, 128]
-                self.strides = [-1, -1, 2, 2, 2, 2]
-                self.pads = [-1, -1, 1, 1, 1, 1]
-                self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
-                self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
-                          [1, 2, .5], [1, 2, .5]]
-                self.normalizations = -1
-                self.steps = []
-            else:
-                self.from_layers = ['ch_concat_mixed_2_chconcat', 'ch_concat_mixed_7_chconcat',
-                               'ch_concat_mixed_10_chconcat', '', '', '']
-                self.num_filters = [-1, -1, -1, 256, 256, 128]
-                self.strides = [-1, -1, -1, 2, 2, 2]
-                self.pads = [-1, -1, -1, 1, 1, 1]
-                self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
-                self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
-                          [1, 2, .5], [1, 2, .5]]
-                self.normalizations = -1
-                self.steps = []
+        # elif network == 'inceptionv3':
+        #     if data_shape >= 448:
+        #         self.from_layers = ['ch_concat_mixed_7_chconcat', 'ch_concat_mixed_10_chconcat', '', '', '', '']
+        #         self.num_filters = [-1, -1, 512, 256, 256, 128]
+        #         self.strides = [-1, -1, 2, 2, 2, 2]
+        #         self.pads = [-1, -1, 1, 1, 1, 1]
+        #         self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
+        #         self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
+        #                   [1, 2, .5], [1, 2, .5]]
+        #         self.normalizations = -1
+        #         self.steps = []
+        #     else:
+        #         self.from_layers = ['ch_concat_mixed_2_chconcat', 'ch_concat_mixed_7_chconcat',
+        #                        'ch_concat_mixed_10_chconcat', '', '', '']
+        #         self.num_filters = [-1, -1, -1, 256, 256, 128]
+        #         self.strides = [-1, -1, -1, 2, 2, 2]
+        #         self.pads = [-1, -1, -1, 1, 1, 1]
+        #         self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
+        #         self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
+        #                   [1, 2, .5], [1, 2, .5]]
+        #         self.normalizations = -1
+        #         self.steps = []
         else:
             raise NotImplementedError("No implementation for network: " + network)
         # anchor box sizes and ratios for 6 feature scales
@@ -230,32 +230,32 @@ class SSD(gluon.HybridBlock):
             with model.name_scope():
                 model.add(multifeatures, class_predictors, box_predictors)
             return model
-        elif self.network == 'inceptionv3':
-            multifeatures = nn.HybridSequential(prefix='multifeatures_')
-            with multifeatures.name_scope():
-                vgg16_reduced = VGG16_reduced(self.num_classes)
-            for k, params in enumerate(zip(self.from_layers, self.num_filters, self.strides, self.pads)):
-                from_layer, num_filter, s, p = params
-                if from_layer.strip():
-                    with multifeatures.name_scope():
-                        multifeatures.add(vgg16_reduced.dict[from_layer])
-                if not from_layer.strip():
-                    # attach from last feature layer
-                    with multifeatures.name_scope():
-                        multifeatures.add(
-                            down_sample(num_filters=num_filter, stride=s, padding=p, prefix='{}_'.format(k)))
-
-            class_predictors = nn.HybridSequential(prefix="class_preds_")
-            box_predictors = nn.HybridSequential(prefix="box_preds_")
-            for i in range(len(multifeatures)):
-                with class_predictors.name_scope():
-                    class_predictors.add(class_predictor(self.num_anchors[i], self.num_classes))
-                with box_predictors.name_scope():
-                    box_predictors.add(box_predictor(self.num_anchors[i]))
-            model = nn.HybridSequential(prefix="")
-            with model.name_scope():
-                model.add(multifeatures, class_predictors, box_predictors)
-            return model
+        # elif self.network == 'inceptionv3':
+        #     multifeatures = nn.HybridSequential(prefix='multifeatures_')
+        #     with multifeatures.name_scope():
+        #         vgg16_reduced = VGG16_reduced(self.num_classes)
+        #     for k, params in enumerate(zip(self.from_layers, self.num_filters, self.strides, self.pads)):
+        #         from_layer, num_filter, s, p = params
+        #         if from_layer.strip():
+        #             with multifeatures.name_scope():
+        #                 multifeatures.add(vgg16_reduced.dict[from_layer])
+        #         if not from_layer.strip():
+        #             # attach from last feature layer
+        #             with multifeatures.name_scope():
+        #                 multifeatures.add(
+        #                     down_sample(num_filters=num_filter, stride=s, padding=p, prefix='{}_'.format(k)))
+        #
+        #     class_predictors = nn.HybridSequential(prefix="class_preds_")
+        #     box_predictors = nn.HybridSequential(prefix="box_preds_")
+        #     for i in range(len(multifeatures)):
+        #         with class_predictors.name_scope():
+        #             class_predictors.add(class_predictor(self.num_anchors[i], self.num_classes))
+        #         with box_predictors.name_scope():
+        #             box_predictors.add(box_predictor(self.num_anchors[i]))
+        #     model = nn.HybridSequential(prefix="")
+        #     with model.name_scope():
+        #         model.add(multifeatures, class_predictors, box_predictors)
+        #     return model
         else:
             raise NotImplementedError("No implementation for network: " + self.network)
 
@@ -998,25 +998,25 @@ class VGG16_reduced(nn.HybridBlock):
         return y
 
 
-class Inceptionv3(nn.HybridBlock):
-    def __init__(self, num_classes, verbose=False, **kwargs):
-        super(Inceptionv3, self).__init__(prefix='inceptionv3_', **kwargs)
-        self.verbose = verbose
-        self.num_class = num_classes
-
-    def Conv(self, data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
-        conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
-                                  name='%s%s_conv2d' % (name, suffix))
-        bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
-        act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
-        return act
-
-    def get_symbol(self):
-        self.whole_net.hybridize()
-        x = mx.sym.var('data')
-        y = self.whole_net(x)
-        self.dict = {'relu4_3': self.relu4_3,
-                     'relu7': self.relu7}
+# class Inceptionv3(nn.HybridBlock):
+#     def __init__(self, num_classes, verbose=False, **kwargs):
+#         super(Inceptionv3, self).__init__(prefix='inceptionv3_', **kwargs)
+#         self.verbose = verbose
+#         self.num_class = num_classes
+#
+#     def Conv(self, data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
+#         conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
+#                                   name='%s%s_conv2d' % (name, suffix))
+#         bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
+#         act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
+#         return act
+#
+#     def get_symbol(self):
+#         self.whole_net.hybridize()
+#         x = mx.sym.var('data')
+#         y = self.whole_net(x)
+#         self.dict = {'relu4_3': self.relu4_3,
+#                      'relu7': self.relu7}
 
 
 def parse_args():
