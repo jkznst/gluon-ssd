@@ -20,7 +20,6 @@ import mxnet as mx
 
 from config.config import cfg
 from dataset.iterator import Det6DRecordIter
-from MultiBoxDetection import myMultiBoxDetection
 
 
 def get_scales(min_scale=0.2, max_scale=0.9,num_layers=6):
