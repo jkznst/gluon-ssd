@@ -138,6 +138,8 @@ class SSD(gluon.HybridBlock):
         super(SSD, self).__init__(prefix='ssd_', **kwargs)
         if network == 'vgg16_reduced':
             if data_shape >= 448:
+                self.network = network
+                self.data_shape = data_shape
                 self.from_layers = ['relu4_3', 'relu7', '', '', '', '', '']
                 self.num_filters = [512, -1, 512, 256, 256, 256, 256]
                 self.strides = [-1, -1, 2, 2, 2, 2, 1]
@@ -150,6 +152,8 @@ class SSD(gluon.HybridBlock):
                 self.steps = [] if data_shape != 512 else [x / 512.0 for x in
                                                       [8, 16, 32, 64, 128, 256, 512]]
             else:
+                self.network = network
+                self.data_shape = data_shape
                 self.from_layers = ['relu4_3', 'relu7', '', '', '', '']
                 self.num_filters = [512, -1, 512, 256, 256, 256]
                 self.strides = [-1, -1, 2, 2, 1, 1]
@@ -184,12 +188,42 @@ class SSD(gluon.HybridBlock):
         #                   [1, 2, .5], [1, 2, .5]]
         #         self.normalizations = -1
         #         self.steps = []
+        elif network == 'resnet50':
+            self.network = 'resnet'
+            self.data_shape = '3,224,224'   # resnet require it as shape check
+            self.num_layers = 50
+
+            self.from_layers = ['_plus12', '_plus15', '', '', '', '']
+            # from_layers = ['_plus6', '_plus12', '_plus15', '', '', '']
+            self.num_filters = [-1, -1, 512, 256, 256, 128]
+            self.strides = [-1, -1, 2, 2, 2, 2]
+            self.pads = [-1, -1, 1, 1, 1, 1]
+            self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(self.from_layers))
+            self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
+                      [1, 2, .5], [1, 2, .5]]
+            self.normalizations = [-1,-1,-1,-1,-1,-1]
+            self.steps = []
+
+        elif network == 'resnet101':
+            self.network = 'resnet'
+            self.data_shape = '3,224,224'
+            self.num_layers = 101
+            self.from_layers = ['_plus29', '_plus32', '', '', '', '']
+            self.num_filters = [-1, -1, 512, 256, 256, 128]
+            self.strides = [-1, -1, 2, 2, 2, 2]
+            self.pads = [-1, -1, 1, 1, 1, 1]
+            self.sizes = get_scales(min_scale=0.2, max_scale=0.9, num_layers=len(from_layers))
+            self.ratios = [[1, 2, .5], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], [1, 2, .5, 3, 1. / 3], \
+                      [1, 2, .5], [1, 2, .5]]
+            self.normalizations = [-1,-1,-1,-1,-1,-1]
+            self.steps = []
+
         else:
             raise NotImplementedError("No implementation for network: " + network)
         # anchor box sizes and ratios for 6 feature scales
-        self.network = network
+
         self.num_classes = num_classes
-        self.data_shape = data_shape
+
         self.num_view_classes = num_view_classes
         self.num_inplane_classes = num_inplane_classes
 
@@ -256,39 +290,110 @@ class SSD(gluon.HybridBlock):
         #     with model.name_scope():
         #         model.add(multifeatures, class_predictors, box_predictors)
         #     return model
+        elif self.network == 'resnet':
+            (nchannel, height, width) = self.data_shape
+            if height <= 28:
+                num_stages = 3
+                if (self.num_layers - 2) % 9 == 0 and self.num_layers >= 164:
+                    per_unit = [(self.num_layers - 2) // 9]
+                    filter_list = [16, 64, 128, 256]
+                    bottle_neck = True
+                elif (self.num_layers - 2) % 6 == 0 and self.num_layers < 164:
+                    per_unit = [(self.num_layers - 2) // 6]
+                    filter_list = [16, 16, 32, 64]
+                    bottle_neck = False
+                else:
+                    raise ValueError("no experiments done on num_layers {}, you can do it yourself".format(self.num_layers))
+                units = per_unit * num_stages
+            else:
+                if self.num_layers >= 50:
+                    filter_list = [64, 256, 512, 1024, 2048]
+                    bottle_neck = True
+                else:
+                    filter_list = [64, 64, 128, 256, 512]
+                    bottle_neck = False
+                num_stages = 4
+                if self.num_layers == 18:
+                    units = [2, 2, 2, 2]
+                elif self.num_layers == 34:
+                    units = [3, 4, 6, 3]
+                elif self.num_layers == 50:
+                    units = [3, 4, 6, 3]
+                elif self.num_layers == 101:
+                    units = [3, 4, 23, 3]
+                elif self.num_layers == 152:
+                    units = [3, 8, 36, 3]
+                elif self.num_layers == 200:
+                    units = [3, 24, 36, 3]
+                elif self.num_layers == 269:
+                    units = [3, 30, 48, 8]
+                else:
+                    raise ValueError("no experiments done on num_layers {}, you can do it yourself".format(self.num_layers))
+
+            multifeatures = nn.HybridSequential(prefix='multi_feat_')
+            with multifeatures.name_scope():
+                resnet = ResNet(units = units,
+                                num_stages  = num_stages,
+                                filter_list = filter_list,
+                                num_classes = self.num_classes,
+                                image_shape = self.data_shape,
+                                bottle_neck = bottle_neck
+                                )
+            for k, params in enumerate(zip(self.from_layers, self.num_filters, self.strides, self.pads)):
+                from_layer, num_filter, s, p = params
+                if from_layer.strip():
+                    with multifeatures.name_scope():
+                        multifeatures.add(resnet.dict[from_layer])
+                if not from_layer.strip():
+                    # attach from last feature layer
+                    with multifeatures.name_scope():
+                        multifeatures.add(
+                            down_sample(num_filters=num_filter, stride=s, padding=p, prefix='{}_'.format(k)))
+
+            class_predictors = nn.HybridSequential(prefix="class_preds_")
+            box_predictors = nn.HybridSequential(prefix="box_preds_")
+            for i in range(len(multifeatures)):
+                with class_predictors.name_scope():
+                    class_predictors.add(class_predictor(self.num_anchors[i], self.num_classes))
+                with box_predictors.name_scope():
+                    box_predictors.add(box_predictor(self.num_anchors[i]))
+            model = nn.HybridSequential(prefix="")
+            with model.name_scope():
+                model.add(multifeatures, class_predictors, box_predictors)
+            return model
         else:
             raise NotImplementedError("No implementation for network: " + self.network)
 
-    def ssd_6d_forward(self, x, model, sizes, ratios, steps=[], verbose=False):
-        multifeatures, class_predictors, box_predictors = model
-
-        anchors, class_preds, box_preds = [], [], []
-
-        for i in range(len(multifeatures)):
-            x = multifeatures[i](x)
-            # predict
-            # create anchor generation layer
-            if steps:
-                step = (steps[i], steps[i])
-            else:
-                step = '(-1.0, -1.0)'
-
-            anchors.append(MultiBoxPrior(
-                x, sizes=sizes[i], ratios=ratios[i], clip=False, steps=step))
-            class_preds.append(
-                flatten_prediction(class_predictors[i](x)))
-            box_preds.append(
-                flatten_prediction(box_predictors[i](x)))
-
-            if verbose:
-                print('Predict scale', i, x.shape, 'with',
-                      anchors[-1].shape[1], 'anchors')
-
-        # concat data
-        return (concat_predictions(anchors),
-                concat_predictions(class_preds),
-                concat_predictions(box_preds))
-        # concat_predictions(bb8_preds))
+    # def ssd_6d_forward(self, x, model, sizes, ratios, steps=[], verbose=False):
+    #     multifeatures, class_predictors, box_predictors = model
+    #
+    #     anchors, class_preds, box_preds = [], [], []
+    #
+    #     for i in range(len(multifeatures)):
+    #         x = multifeatures[i](x)
+    #         # predict
+    #         # create anchor generation layer
+    #         if steps:
+    #             step = (steps[i], steps[i])
+    #         else:
+    #             step = '(-1.0, -1.0)'
+    #
+    #         anchors.append(MultiBoxPrior(
+    #             x, sizes=sizes[i], ratios=ratios[i], clip=False, steps=step))
+    #         class_preds.append(
+    #             flatten_prediction(class_predictors[i](x)))
+    #         box_preds.append(
+    #             flatten_prediction(box_predictors[i](x)))
+    #
+    #         if verbose:
+    #             print('Predict scale', i, x.shape, 'with',
+    #                   anchors[-1].shape[1], 'anchors')
+    #
+    #     # concat data
+    #     return (concat_predictions(anchors),
+    #             concat_predictions(class_preds),
+    #             concat_predictions(box_preds))
+    #     # concat_predictions(bb8_preds))
 
     def params_init(self, ctx):
         self.model.collect_params().initialize(mx.init.Xavier(magnitude=2), ctx=ctx)
@@ -847,62 +952,162 @@ def get_lr_scheduler(learning_rate, lr_refactor_step, lr_refactor_ratio,
         return (lr, lr_scheduler)
 
 
-class Residual(nn.HybridBlock):
-    def __init__(self, channels, same_shape=True, **kwargs):
-        super(Residual, self).__init__(**kwargs)
-        self.same_shape = same_shape
-        with self.name_scope():
-            strides = 1 if same_shape else 2
-            self.conv1 = nn.Conv2D(channels, kernel_size=3, padding=1,
-                                  strides=strides)
-            self.bn1 = nn.BatchNorm()
-            self.conv2 = nn.Conv2D(channels, kernel_size=3, padding=1)
-            self.bn2 = nn.BatchNorm()
-            if not same_shape:
-                self.conv3 = nn.Conv2D(channels, kernel_size=1,
-                                      strides=strides)
+class residual_unit(nn.HybridBlock):
+    def __init__(self, num_filter, stride, dim_match, prefix='', bottle_neck=True, bn_mom=0.9, **kwargs):
+        """Return ResNet Unit symbol for building ResNet
+        Parameters
+        ----------
+        num_filter : int
+            Number of output channels
+        bnf : int
+            Bottle neck channels factor with regard to num_filter
+        stride : tupe
+            Stride used in convolution
+        dim_match : Boolen
+            True means channel number between input and output is the same, otherwise means differ
+        name : str
+            Base name of the operators
+        workspace : int
+            Workspace used in convolution operator
+        """
+        super(residual_unit, self).__init__(prefix=prefix, **kwargs)
+        self.dim_match = dim_match
+        out = nn.HybridSequential(prefix=prefix)
+        self.bottle_neck = bottle_neck
+        if bottle_neck:
+            # the same as https://github.com/facebook/fb.resnet.torch#notes, a bit difference with origin paper
+            with self.name_scope():
+                self.bn1 = nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, prefix='bn1_'),
+                self.relu1 = nn.Activation(activation='relu', prefix='relu1_'),
+                self.conv1 = nn.Conv2D(channels=int(num_filter*0.25), kernel_size=(1,1), strides=(1,1),
+                          padding=(0,0), use_bias=False, prefix='conv1_'),
+                self.bn2 = nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, prefix='bn2_'),
+                self.relu2 = nn.Activation(activation='relu', prefix='relu2_'),
+                self.conv2 = nn.Conv2D(channels=int(num_filter * 0.25), kernel_size=(3, 3), strides=stride,
+                          padding=(1, 1), use_bias=False, prefix='conv2_'),
+                self.bn3 = nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, prefix='bn3_'),
+                self.relu3 = nn.Activation(activation='relu', prefix='relu3_'),
+                self.conv3 = nn.Conv2D(channels=num_filter, kernel_size=(1, 1), strides=(1, 1),
+                          padding=(0, 0), use_bias=False, prefix='conv3_')
 
-    def hybrid_forward(self, F, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        if not self.same_shape:
-            x = self.conv3(x)
-        return F.relu(out + x)
+                if not dim_match:
+                    self.convsc = nn.Conv2D(channels=num_filter, kernel_size=(1,1), strides=stride, padding=(0,0),
+                                            use_bias=False, prefix='sc_')
+
+        else:
+            with out.name_scope():
+                self.bn1 = nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, prefix='bn1_'),
+                self.relu1 = nn.Activation(activation='relu', prefix='relu1_'),
+                self.conv1 = nn.Conv2D(channels=num_filter, kernel_size=(3,3), strides=stride,
+                          padding=(1,1), use_bias=False, prefix='conv1_'),
+                self.bn2 = nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, prefix='bn2_'),
+                self.relu2 = nn.Activation(activation='relu', prefix='relu2_'),
+                self.conv2 = nn.Conv2D(channels=num_filter, kernel_size=(3, 3), strides=(1,1),
+                          padding=(1, 1), use_bias=False, prefix='conv2_')
+
+                if not dim_match:
+                    self.convsc = nn.Conv2D(channels=num_filter, kernel_size=(1,1), strides=stride, padding=(0,0),
+                                            use_bias=False, prefix='sc_')
+
+    def hybrid_forward(self, F, x, *args, **kwargs):
+        if self.bottle_neck:
+            out = self.conv1(self.relu1(self.bn1(x)))
+            out = self.conv2(self.relu2(self.bn2(out)))
+            out = self.conv3(self.relu3(self.bn3(out)))
+
+        else:
+            out = self.conv1(self.relu1(self.bn1(x)))
+            out = self.conv2(self.relu2(self.bn2(out)))
+
+        if not self.dim_match:
+            x = self.convsc(x)
+        return out + x
+
+
 
 
 class ResNet(nn.HybridBlock):
-    def __init__(self, num_classes, verbose=False, **kwargs):
-        super(ResNet, self).__init__(**kwargs)
+    def __init__(self, units, num_stages, filter_list, num_classes,
+                 image_shape, bottle_neck=True,
+           bn_mom=0.9, workspace=256, memonger=False, verbose=False, **kwargs):
+        """Return ResNet symbol of
+        Parameters
+        ----------
+        units : list
+            Number of units in each stage
+        num_stages : int
+            Number of stage
+        filter_list : list
+            Channel size of each stage
+        num_classes : int
+            Ouput size of symbol
+        dataset : str
+            Dataset type, only cifar10 and imagenet supports
+        workspace : int
+            Workspace used in convolution operator
+        """
+        super(ResNet, self).__init__(prefix='resnet_', **kwargs)
         self.verbose = verbose
-        with self.name_scope():
-            net = self.net = nn.HybridSequential()
-            # group 1
-            net.add(nn.Conv2D(channels=32, kernel_size=3, strides=1, padding=1))
-            net.add(nn.BatchNorm())
-            net.add(nn.Activation(activation='relu'))
-            # group 2
-            for _ in range(3):
-                net.add(Residual(channels=32))
-            # group 3
-            net.add(Residual(channels=64, same_shape=False))
-            for _ in range(2):
-                net.add(Residual(channels=64))
-            # group 4
-            net.add(Residual(channels=128, same_shape=False))
-            for _ in range(2):
-                net.add(Residual(channels=128))
-            # group 5
-            net.add(nn.AvgPool2D(pool_size=8))
-            net.add(nn.Flatten())
-            net.add(nn.Dense(num_classes))
+        num_unit = len(units)
+        assert (num_unit == num_stages)
+        (nchannel, height, width) = image_shape
 
-    def hybrid_forward(self, F, x):
-        out = x
-        for i, b in enumerate(self.net):
-            out = b(out)
-            if self.verbose:
-                print('Block %d output: %s'%(i+1, out.shape))
-        return out
+        with self.name_scope():
+            stage3 = self.stage3 = nn.HybridSequential(prefix='stage3_')
+            with stage3.name_scope():
+                # stage 0
+                stage3.add(
+                    nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, gamma_initializer='ones', prefix='bn_data_')
+                                )
+                if height <= 32:
+                    stage3.add(
+                        nn.Conv2D(channels=filter_list[0], kernel_size=(3,3), strides=(1, 1), padding=(1, 1),
+                            use_bias=False, prefix='conv0_')
+                    )
+                else:
+                    stage3.add(
+                        nn.Conv2D(channels=filter_list[0], kernel_size=(7,7), strides=(2,2), padding=(3,3),
+                                  use_bias=False, prefix='conv0_'),
+                        nn.BatchNorm(momentum=bn_mom, epsilon=2e-5, prefix='bn0_'),
+                        nn.Activation(activation='relu', prefix='relu0_'),
+                        nn.MaxPool2D(pool_size=(3, 3), strides=(2,2), padding=(1,1))
+                    )
+
+                # stage 1,2,3
+                for i in range(3):
+                    stage3.add(
+                        residual_unit(filter_list[i + 1], stride=(1 if i == 0 else 2, 1 if i == 0 else 2),
+                                    dim_match=False,
+                                    name='stage%d_unit%d' % (i + 1, 1),
+                                    bottle_neck=bottle_neck, workspace=workspace,
+                                    memonger=memonger)
+                    )
+                    for j in range(units[i]-1):
+                        stage3.add(
+                            residual_unit(filter_list[i + 1], (1, 1), dim_match=True,
+                                          name='stage%d_unit%d' % (i + 1, j + 2),
+                                          bottle_neck=bottle_neck, workspace=workspace, memonger=memonger)
+                        )
+
+            stage4 = self.stage4 = nn.HybridSequential(prefix='stage4_')
+            with stage4.name_scope():
+                stage4.add(
+                    residual_unit(filter_list[4], stride=(2, 2),
+                                  dim_match=False,
+                                  name='stage%d_unit%d' % (4, 1),
+                                  bottle_neck=bottle_neck, workspace=workspace,
+                                  memonger=memonger)
+                )
+                for j in range(units[3] - 1):
+                    stage3.add(
+                        residual_unit(filter_list[4], (1, 1), dim_match=True,
+                                      name='stage%d_unit%d' % (4, j + 2),
+                                      bottle_neck=bottle_neck, workspace=workspace, memonger=memonger)
+                    )
+
+        self.dict = {'stage3': self.stage3,
+                     'stage4': self.stage4}
+
 
 
 class VGG16_reduced(nn.HybridBlock):
@@ -978,24 +1183,8 @@ class VGG16_reduced(nn.HybridBlock):
                     # nn.Dropout(rate=0.5, prefix="drop7")
                 )
 
-            self.whole_net = nn.HybridSequential(prefix="whole_net_")
-            with self.whole_net.name_scope():
-                # group 8
-                self.whole_net.add(
-                    self.relu4_3,
-                    self.relu7,
-                    nn.GlobalAvgPool2D(prefix="global_pool_"),
-                    nn.Conv2D(channels=num_classes, kernel_size=(1, 1), strides=(1, 1), padding=(0, 0), prefix="fc8_"),
-                    nn.Flatten()
-                )
         self.dict = {'relu4_3' : self.relu4_3,
                      'relu7' : self.relu7}
-
-    def get_symbol(self):
-        self.whole_net.hybridize()
-        x = mx.sym.var('data')
-        y = self.whole_net(x)
-        return y
 
 
 # class Inceptionv3(nn.HybridBlock):
