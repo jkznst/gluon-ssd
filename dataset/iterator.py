@@ -98,26 +98,13 @@ class DetRecordIter(mx.io.DataIter):
             self.max_objects = (first_label.size - self.label_start) // self.label_object_width
             self.label_shape = (self.batch_size, self.max_objects, self.label_object_width) #(32, 43, 8)
             self.label_end = self.label_start + self.max_objects * self.label_object_width
-            self.provide_label = [('whole_label', self.label_shape),
-                                  ('cls_label', (self.batch_size, self.max_objects, 5))]
-                                  # ('view_cls_label', (self.batch_size, self.max_objects, 5)),
-                                  # ('inplane_cls_label', (self.batch_size, self.max_objects, 5))]
+            self.provide_label = [('label', self.label_shape)]
 
         # modify label
         label = self._batch.label[0].asnumpy()
         label = label[:, self.label_start:self.label_end].reshape(
             (self.batch_size, self.max_objects, self.label_object_width))
         self._batch.label = [mx.nd.array(label)]
-
-        self._batch.cls_label = [mx.nd.array(label[:, :, 0:5])]
-
-        view_cls_label = label[:, :, 0:5]
-        view_cls_label[:, :, 0] = label[:, :, 6]
-        self._batch.view_cls_label = [mx.nd.array(view_cls_label)]
-
-        inplane_cls_label = view_cls_label
-        inplane_cls_label[:, :, 0] = label[:, :, 7]
-        self._batch.inplane_cls_label = [mx.nd.array(inplane_cls_label)]
         return True
 
 

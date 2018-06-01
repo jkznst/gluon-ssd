@@ -19,7 +19,7 @@ from mxnet import autograd
 import mxnet as mx
 
 from config.config import cfg
-from dataset.iterator import Det6DRecordIter
+from dataset.iterator import DetRecordIter
 from symbol.vgg16_reduced import VGG16_reduced, NormScale
 from symbol.ResNet import ResNet
 from loss import FocalLoss, MaskSoftmaxCELoss, SmoothL1Loss
@@ -451,27 +451,6 @@ class SSD(gluon.HybridBlock):
         return anchors, class_preds, box_preds
 
 
-# class Inceptionv3(nn.HybridBlock):
-#     def __init__(self, num_classes, verbose=False, **kwargs):
-#         super(Inceptionv3, self).__init__(prefix='inceptionv3_', **kwargs)
-#         self.verbose = verbose
-#         self.num_class = num_classes
-#
-#     def Conv(self, data, num_filter, kernel=(1, 1), stride=(1, 1), pad=(0, 0), name=None, suffix=''):
-#         conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=kernel, stride=stride, pad=pad, no_bias=True,
-#                                   name='%s%s_conv2d' % (name, suffix))
-#         bn = mx.sym.BatchNorm(data=conv, name='%s%s_batchnorm' % (name, suffix), fix_gamma=True)
-#         act = mx.sym.Activation(data=bn, act_type='relu', name='%s%s_relu' % (name, suffix))
-#         return act
-#
-#     def get_symbol(self):
-#         self.whole_net.hybridize()
-#         x = mx.sym.var('data')
-#         y = self.whole_net(x)
-#         self.dict = {'relu4_3': self.relu4_3,
-#                      'relu7': self.relu7}
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a Single-shot detection network')
     parser.add_argument('--train-path', dest='train_path', help='train record to use',
@@ -588,11 +567,9 @@ if __name__ == '__main__':
     ctx = mx.gpu(int(args.gpus))
     checkpoint_period = 10
     use_visdom = True
-    log_file = 'train.log'
-    prefix = os.path.join(os.getcwd(), 'output', 'exp1', 'ssd')
-    class_name = 'aeroplane, bicycle, bird, boat, bottle, bus, car, cat, chair, cow, diningtable, dog, horse, motorbike, ' \
-                 'person, pottedplant, sheep, sofa, train, tvmonitor'
-    class_name = class_name.split(', ')
+    log_file = args.log_file
+    prefix = args.prefix
+    class_name = [c.strip() for c in args.class_name.split(',')]
 
     # export mxnet pretrained models
     # data = mx.nd.ones(shape=(1,3,224,224))
@@ -612,11 +589,11 @@ if __name__ == '__main__':
         fh = logging.FileHandler(log_file_path)
         logger.addHandler(fh)
 
-    train_iter = Det6DRecordIter(train_path, batch_size, data_shape, mean_pixels=mean_pixels,
+    train_iter = DetRecordIter(train_path, batch_size, data_shape, mean_pixels=mean_pixels,
                                    label_pad_width=label_pad_width, path_imglist=train_list, **cfg.train)
 
     if val_path:
-        val_iter = Det6DRecordIter(val_path, batch_size, data_shape, mean_pixels=mean_pixels,
+        val_iter = DetRecordIter(val_path, batch_size, data_shape, mean_pixels=mean_pixels,
                                      label_pad_width=label_pad_width, path_imglist=val_list, **cfg.valid)
     else:
         val_iter = None
@@ -631,7 +608,7 @@ if __name__ == '__main__':
     box_metric = MaskMAE()
     val_metric = VOC07MApMetric(ovp_thresh=0.45, class_names=class_name, roc_output_path=os.path.join(os.path.dirname(prefix), 'roc'))
 
-    net = SSD(network=args.network, data_shape=args.data_shape, num_classes=20, verbose=False)
+    net = SSD(network=args.network, data_shape=args.data_shape, num_classes=args.num_class, verbose=False)
     net.params_init(ctx)
     # net.hybridize()
 
