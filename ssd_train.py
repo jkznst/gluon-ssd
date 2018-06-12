@@ -392,9 +392,9 @@ class SSD(gluon.HybridBlock):
 
     def init_body_params(self, ctx):
         if self.network == 'vgg16_reduced':
-            self.model[0][0].load_params(filename="./models/vgg16_reduced-0001.params",
+            self.model[0][0].load_params(filename="./model/vgg16_reduced-0001.params",
                                           ctx=ctx, allow_missing=True, ignore_extra=True)
-            self.model[0][1].load_params(filename="./models/vgg16_reduced-0001.params",
+            self.model[0][1].load_params(filename="./model/vgg16_reduced-0001.params",
                                           ctx=ctx, allow_missing=False, ignore_extra=True)
         else:
             raise NotImplementedError("No implementation for initialization of network: " + self.network)
@@ -569,7 +569,7 @@ if __name__ == '__main__':
     use_visdom = True
     log_file = args.log_file
     prefix = args.prefix
-    class_name = [c.strip() for c in args.class_name.split(',')]
+    class_name = [c.strip() for c in args.class_names.split(',')]
 
     # export mxnet pretrained models
     # data = mx.nd.ones(shape=(1,3,224,224))
@@ -643,7 +643,7 @@ if __name__ == '__main__':
     logger.info('optimizer: {}, learning rate: {}, lr_refactor_ratio: 0.1, lr_refactor_step: 80,160'.format(
         args.optimizer, learning_rate))
 
-    for epoch in range(240):
+    for epoch in range(args.end_epoch):
         # reset data iterators and metrics
         train_iter.reset()
         val_iter.reset()
